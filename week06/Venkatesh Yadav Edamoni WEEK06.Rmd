@@ -1,0 +1,139 @@
+---
+title: "Week 6 Assignment"
+author: "Venkatesh"
+date: "2025-03-02"
+output: html_document
+---
+```{r}
+library(data.table)
+library(geosphere)
+library(GA)
+library(purrr)
+library(sf)
+
+## Load the population data
+pop.data <- data.table::fread("C:/Users/venky/Downloads/Mo_pop_Sim/Mo_pop_Sim.csv")
+str(pop.data)
+frac <- 0.0001
+sample.data <- pop.data[sample(1:nrow(pop.data),
+                               size = round(nrow(pop.data) * frac),
+                               replace = F), ## extract a sample of randomly chosen 1% rows
+                        ]  ## and choose all columns
+
+## Load the FQHC data
+data_path <- 'MO_2018_Federally_Qualified_Health_Center_Locations'
+fqhc.data <- data.table(as.data.frame(st_read("C:/Users/venky/Downloads/MO_2018_Federally_Qualified_Health_Center_Locations/MO_2018_Federally_Qualified_Health_Center_Locations")))
+
+fqhc.coords <- data.table(
+  ID = 1:nrow(fqhc.data),
+  LONGITUDE = fqhc.data$Longitude,
+  LATITUDE = fqhc.data$Latitude,
+  NAME = fqhc.data$Facility,
+  GROUP = fqhc.data$Group_Name
+)
+
+```
+
+
+# Approach 1: Average closeness (accessibility)
+```{r}
+calculate_avg_distance <- function() {
+  avg_distances <- numeric(nrow(fqhc.coords))
+  
+  for (i in 1:nrow(fqhc.coords)) {
+    fqhc_loc <- c(fqhc.coords$LONGITUDE[i], fqhc.coords$LATITUDE[i])
+    distances <- distHaversine(matrix(c(sample.data$long, sample.data$lat), ncol=2),
+                             matrix(rep(fqhc_loc, each=nrow(sample.data)), ncol=2))
+
+    avg_distances[i] <- mean(distances)
+  }
+  fqhc.coords[, avg_distance := avg_distances]
+  return(fqhc.coords)
+}
+
+```
+
+
+
+```{r}
+calculate_pop_density <- function() {
+  density_counts <- numeric(nrow(fqhc.coords))
+  
+  for (i in 1:nrow(fqhc.coords)) {
+    fqhc_loc <- c(fqhc.coords$LONGITUDE[i], fqhc.coords$LATITUDE[i])
+    distances <- distHaversine(matrix(c(sample.data$long, sample.data$lat), ncol=2),
+                             matrix(rep(fqhc_loc, each=nrow(sample.data)), ncol=2))
+    density_counts[i] <- sum(distances <= 48280)
+  }
+  fqhc.coords[, pop_density := density_counts * (1/frac)]
+  return(fqhc.coords)
+}
+```
+
+
+```{r}
+fqhc.metrics <- calculate_avg_distance()
+fqhc.metrics <- calculate_pop_density()
+```
+
+
+```{r}
+top_access <- fqhc.metrics[order(avg_distance)][1:8]
+print(top_access[, .(ID, NAME, avg_distance)])
+```
+
+
+
+```{r}
+top_density <- fqhc.metrics[order(-pop_density)][1:8]
+print(top_density[, .(ID, NAME, GROUP, pop_density)])
+```
+
+```{r}
+# Combined approach: Rank locations by both metrics
+fqhc.metrics[, access_rank := rank(avg_distance)]
+fqhc.metrics[, density_rank := rank(-pop_density)]
+fqhc.metrics[, combined_score := access_rank + density_rank]
+
+top_combined <- fqhc.metrics[order(combined_score)][1:8]
+print(top_combined[, .(ID, NAME, GROUP, combined_score, avg_distance, pop_density)])
+```
+
+```{r}
+ga_fitness <- function(selection) {
+  selected_fqhc <- fqhc.metrics[selection == 1, ]
+  
+  # Compute the combined score for selected locations
+  total_score <- sum(selected_fqhc$combined_score)
+  
+  # We want to minimize the combined score
+  return(-total_score)
+}
+
+# Run Genetic Algorithm
+set.seed(123)
+GA_model <- ga(
+  type = "binary",
+  fitness = ga_fitness,
+  nBits = nrow(fqhc.metrics),
+  popSize = 50,   
+  maxiter = 100,   
+  pmutation = 0.1, 
+  elitism = 2  
+)
+
+# Extract the best solution
+best_solution <- as.logical(GA_model@solution[1, ])
+best_fqhc <- fqhc.metrics[best_solution, ]
+
+# Print the optimal locations
+print(best_fqhc[, .(ID, NAME, GROUP, combined_score, avg_distance, pop_density)])
+```
+
+
+
+
+From the above two possibilities, choose one and explain your rationale for choosing it, along with the assumptions you are making in computing the fitness of each location. Then, describe the fitness function - what is the metric that you would compute and would it be maximized or minimized? Why?
+
+The combined method utilizing both accessibility calculations (average distance) and population density measurements would be my selection. The combined approach minimizes the trade-off between effective service reach and serves densely populated areas. The fitness function combines both metrics' ranks into one score which minimizes the total value to identify optimal service facility locations. The method provides a balanced solution against the drawbacks of singular focus by distance reduction or density amplification since distance-only minimization favors central areas but density-only maximization places services in urban areas against rural access needs. Service utilization depends on travel distance between patients and providers while population data collection and mental health need distribution follow uniform patterns between urban and rural areas. This dual approach considers equitable distribution between regions and maximizes service reach to the most residents.
+
